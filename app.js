@@ -3,7 +3,9 @@
 // The token stays in the URL fragment (never sent to the web server) and is removed from the address bar.
 import { ESPLoader, Transport } from "./vendor/esptool-js-0.5.7/bundle.js";
 import { md5, binStrToBytes, bytesToBinStr } from "./md5.js";
+import { SPEEDS, retrySlower, fatal, friendlyError, browserVerdict } from "./resilience.js";
 
+const APP_VERSION = "2.0 (17 Nov 2026)";
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
 const logLines = [];
@@ -16,12 +18,17 @@ function log(s) {
 }
 const say = (id, html, cls = "") => { $(id).innerHTML = cls ? `<span class="${cls}">${html}</span>` : html; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let curStep = 1, busy = false;
 function stepState(n, state) {               // state: on | done | off
   const c = $("s" + n);
   c.classList.toggle("off", state === "off");
   c.classList.toggle("done", state === "done");
-  if (state === "on") c.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (state === "on") { curStep = n; c.scrollIntoView({ behavior: "smooth", block: "center" }); }
 }
+$("ver").textContent = APP_VERSION;
+window.addEventListener("error", (e) => log("page error: " + e.message));
+window.addEventListener("unhandledrejection", (e) => log("page promise error: " + (e.reason && e.reason.message || e.reason)));
+window.addEventListener("beforeunload", (e) => { if (busy) { e.preventDefault(); e.returnValue = ""; } });
 
 // ---------- link parameters ----------
 // Kept in this tab's sessionStorage so a page reload still works (cleared when the tab closes).
@@ -35,20 +42,32 @@ const FW = (hp.get("fw") || "").trim();
 const TOKEN = (hp.get("t") || "").trim();
 const NAME = (hp.get("n") || "").trim();
 if (location.hash) history.replaceState(null, "", location.pathname);
-if (NAME) $("who").textContent = `${NAME}: one-time update. About 5 minutes. After this, updates happen over WiFi.`;
-log(`page loaded; fw=${FW || "?"} token=${TOKEN ? "…" + TOKEN.slice(-4) : "none"}`);
+if (NAME) $("who").textContent = `${NAME}: one-time update. About 5 to 10 minutes. After this, updates happen over WiFi.`;
+log(`installer ${APP_VERSION}; fw=${FW || "?"} token=${TOKEN ? "…" + TOKEN.slice(-4) : "none"}; ${navigator.userAgent}`);
 
 let manifest = null, parts = null;
 let port = null, transport = null, loader = null;
 let backup = null, backupName = "", flashBytes = 0, mac = "";
+const bk = { out: null, a: 0 };             // backup progress, kept so a retry resumes where it stopped
 
+const tick = (id, ok, html) => { const el = $(id); el.querySelector(".ic").textContent = ok === true ? "✅" : ok === false ? "❌" : "⏳"; el.querySelector(".tx").innerHTML = html; };
+
+async function fetchOk(url) {                // a flaky connection gets 3 tries
+  let last;
+  for (let i = 0; i < 3; i++) {
+    try { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`); return r; }
+    catch (e) { last = e; if (i < 2) await sleep(1200); }
+  }
+  throw last;
+}
 async function loadFirmware() {
   if (!/^TMPL[0-9A-Za-z]+$/.test(FW) || !/^[A-Za-z0-9_-]{32}$/.test(TOKEN)) throw new Error("link");
   const base = `fw/${FW}/`;
-  manifest = await (await fetch(base + "manifest.json", { cache: "no-store" })).json();
+  manifest = await (await fetchOk(base + "manifest.json")).json();
+  if (manifest.template !== FW) throw new Error("This link doesn't match the software on the server.");
   parts = [];
   for (const p of manifest.parts) {
-    const buf = new Uint8Array(await (await fetch(base + p.file, { cache: "no-store" })).arrayBuffer());
+    const buf = new Uint8Array(await (await fetchOk(base + p.file)).arrayBuffer());
     const h = md5(buf);
     if (buf.length !== p.size || h !== p.md5) throw new Error(`download check failed for ${p.file}`);
     parts.push({ address: p.address, bytes: buf, md5: h });
@@ -57,35 +76,53 @@ async function loadFirmware() {
 }
 
 const ready = (async () => {
-  if (!("serial" in navigator)) { $("unsupported").classList.remove("hide"); $("bConnect").disabled = true; return false; }
-  try { await loadFirmware(); return true; }
-  catch (e) {
+  const bv = browserVerdict(navigator.userAgent, "serial" in navigator);
+  if (!bv.ok) {
+    tick("c-browser", false, bv.why);
+    $("unsupported").classList.remove("hide"); $("unsupportedWhy").textContent = bv.why; $("bConnect").disabled = true; return false;
+  }
+  tick("c-browser", true, "Browser OK (Chrome or Edge).");
+  try {
+    await loadFirmware();
+    tick("c-fw", true, `Software V${manifest.version} downloaded and checked.`);
+    return true;
+  } catch (e) {
     log("firmware load error: " + e.message);
+    tick("c-fw", false, "Couldn't get the software.");
     $("badlink").classList.remove("hide");
-    if (e.message !== "link") $("badlink").querySelector("p").textContent = "Couldn't download the software. Check the internet and reload this page.";
+    $("badlinkMsg").textContent = e.message === "link" ? "Please ask Nikhil to send the link again." : "Couldn't download the software. Check the internet connection and reload this page.";
     $("bConnect").disabled = true;
     return false;
   }
 })();
+
+if ("serial" in navigator) navigator.serial.addEventListener("disconnect", () => {
+  log("USB device disconnected");
+  if (!busy) return;
+  const fe = friendlyError(new Error("device has been lost"));
+  say("m" + curStep, `<b>${fe.title}</b> ${fe.hint}`, "bad");
+});
 
 // ---------- esptool terminal ----------
 const term = { clean() {}, writeLine(d) { log("esptool: " + d); }, write(d) { if (String(d).trim()) log("esptool: " + d); } };
 
 // Fast speed first; if the link is noisy (long wires, some cables) fall back to slower, safer speeds.
 let goodBaud = 0;
+async function openAt(baud) {
+  log(`connecting at ${baud} baud`);
+  transport = new Transport(port, false);
+  loader = new ESPLoader({ transport, baudrate: baud, romBaudrate: 115200, terminal: term, debugLogging: false });
+  const desc = await loader.main();
+  await loader.chip.readMac(loader);           // quick read to prove the link works at this speed
+  goodBaud = baud;
+  return desc;
+}
 async function openLoader() {
-  const speeds = goodBaud ? [goodBaud] : [460800, 230400, 115200];
+  const speeds = [...(goodBaud ? SPEEDS.filter((s) => s <= goodBaud) : SPEEDS), SPEEDS[SPEEDS.length - 1]];
   let lastErr = null;
   for (const baud of speeds) {
-    try {
-      log(`connecting at ${baud} baud`);
-      transport = new Transport(port, false);
-      loader = new ESPLoader({ transport, baudrate: baud, romBaudrate: 115200, terminal: term, debugLogging: false });
-      const desc = await loader.main();
-      await loader.chip.readMac(loader);           // quick read to prove the link works at this speed
-      goodBaud = baud;
-      return desc;
-    } catch (e) {
+    try { return await openAt(baud); }
+    catch (e) {
       lastErr = e;
       log(`failed at ${baud}: ${e.message}`);
       await closeLoader();
@@ -99,6 +136,14 @@ async function closeLoader() {
   try { if (transport) await transport.disconnect(); } catch (e) { log("disconnect: " + e.message); }
   transport = null; loader = null;
 }
+async function reopen(baud) { await closeLoader(); await sleep(600); await openAt(baud); }
+// Run one install step; if it fails, reconnect at a slower speed and continue (resume position is kept).
+async function guarded(step, fn) {
+  try {
+    const r = await retrySlower({ run: fn, reopen, current: goodBaud || SPEEDS[0], log });
+    return r.value;
+  } catch (e) { fail(step, e); throw e; }
+}
 
 // ---------- step 1+2+3 ----------
 $("bConnect").onclick = async () => {
@@ -109,46 +154,72 @@ $("bConnect").onclick = async () => {
     say("m1", "Waiting for you to pick the purifier in the box…");
     port = await navigator.serial.requestPort();
   } catch (e) {
-    say("m1", "No device picked.", "warn"); $("tips1").classList.remove("hide"); $("bConnect").disabled = false; return;
+    say("m1", "No device picked. If the list was empty, see the help below.", "warn"); $("tips1").classList.remove("hide"); $("bConnect").disabled = false; return;
   }
   try {
     say("m1", "Connecting…");
     const desc = await openLoader();
-    if (loader.chip.CHIP_NAME !== "ESP32") throw new Error(`This board is ${loader.chip.CHIP_NAME}, not the expected ESP32. Stop here and send Nikhil a screenshot.`);
+    if (loader.chip.CHIP_NAME !== "ESP32") throw fatal(`This board is ${loader.chip.CHIP_NAME}, not the expected ESP32. Stop here and send Nikhil a screenshot.`);
     mac = await loader.chip.readMac(loader);
     const kb = await loader.getFlashSize();
     flashBytes = (kb || 0) * 1024;
-    if (flashBytes < 4 * 1024 * 1024) throw new Error(`Flash size ${kb} KB is unexpected. Stop here and send Nikhil a screenshot.`);
-    log(`chip: ${desc}, mac ${mac}, flash ${kb} KB`);
+    if (flashBytes < 4 * 1024 * 1024) throw fatal(`Flash size ${kb} KB is unexpected. Stop here and send Nikhil a screenshot.`);
+    log(`chip: ${desc}, mac ${mac}, flash ${kb} KB, link ${goodBaud} baud`);
     say("m1", `Connected ✓ <span class="mut">(${desc}, ${mac})</span>`, "ok");
     stepState(1, "done");
   } catch (e) {
     log("connect error: " + (e.stack || e.message));
-    say("m1", "Couldn't connect: " + e.message, "bad");
+    const fe = friendlyError(e);
+    say("m1", `<b>${fe.title}</b> ${fe.hint}`, "bad");
     $("tips1").classList.remove("hide");
     await closeLoader();
     $("bConnect").disabled = false;
     return;
   }
-  try { await doBackup(); } catch (e) { return fail(2, e); }
-  try { await doInstall(); } catch (e) { return fail(3, e); }
+  busy = true;
+  try {
+    if (await alreadyInstalled()) {            // re-running the page on a board that is already done: don't touch it
+      stepState(2, "done"); say("m2", "This purifier already has this software, so no backup is needed ✓", "ok");
+      say("m3", `Already installed ✓ <span class="mut">(V${manifest.version})</span>`, "ok"); stepState(3, "done");
+      await loader.after("hard_reset"); await closeLoader();
+    } else {
+      await guarded(2, doBackup);
+      await guarded(3, doInstall);
+    }
+  } catch (e) { busy = false; return; }
+  busy = false;
   await afterInstall();
 };
 
 function fail(step, e) {
+  busy = false;
+  const fe = friendlyError(e);
   log(`step ${step} error: ` + (e.stack || e.message));
-  say("m" + step, "Something went wrong: " + e.message + "<br>Nothing is lost. Unplug the USB cable, plug it back in, reload this page and try again. If it happens again, open “Something went wrong?” below and send Nikhil the details.", "bad");
+  const keep = step >= 3 && backupName ? `<br>Your backup file <b>${escapeHtml(backupName)}</b> is in your Downloads folder. Keep it.` : "";
+  say("m" + step, `<b>${fe.title}</b> ${escapeHtml(fe.hint)}${keep}<br><span class="mut">Nothing is lost. Unplug the USB cable, plug it back in, reload this page (the same link still works) and click Connect again. If it happens again, open “Something went wrong?” below and send Nikhil the details.</span>`, "bad");
   $("help").open = true;
   closeLoader();
 }
 
+async function alreadyInstalled() {
+  try {
+    for (const p of parts) {
+      const h = await loader.flashMd5sum(p.address, p.bytes.length);
+      if (String(h) !== p.md5) return false;
+    }
+    return true;
+  } catch (e) { log("already-installed check: " + e.message); return false; }
+}
+
+const stamp = () => { const d = new Date(), z = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}`; };
 async function doBackup() {
   stepState(2, "on");
   const CH = 0x10000;                         // read in 64 KB pieces
-  const out = new Uint8Array(flashBytes);
+  if (!bk.out) { bk.out = new Uint8Array(flashBytes); bk.a = 0; }
+  const out = bk.out;
   const t0 = Date.now();
-  for (let a = 0; a < flashBytes; a += CH) {
-    const n = Math.min(CH, flashBytes - a);
+  for (; bk.a < flashBytes; bk.a += CH) {     // an interrupted run resumes at the same piece
+    const a = bk.a, n = Math.min(CH, flashBytes - a);
     let piece = null;
     for (let tries = 0; tries < 3 && !piece; tries++) {
       try { piece = await loader.readFlash(a, n); }
@@ -160,15 +231,15 @@ async function doBackup() {
     $("p2").style.width = pct + "%";
     say("m2", `Reading… ${pct}%`);
   }
-  backup = out;
   const h = md5(out);
   const flashH = await loader.flashMd5sum(0, flashBytes);
-  if (String(flashH) !== h) throw new Error("backup check failed (the copy doesn't match). Please try again.");
-  backupName = `purifier-backup-${mac.replace(/:/g, "")}-${new Date().toISOString().slice(0, 10)}.bin`;
+  if (String(flashH) !== h) { bk.out = null; bk.a = 0; throw new Error("backup check failed (the copy doesn't match). Please try again."); }
+  backup = out;
+  backupName = `purifier-backup-${mac.replace(/:/g, "")}-${stamp()}.bin`;
   downloadBackup();
   $("bBackup").disabled = false; $("bRestore").disabled = false;
   log(`backup ${flashBytes} bytes md5 ${h} in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-  say("m2", `Backup saved ✓ <span class="mut">(${backupName} in your Downloads)</span>`, "ok");
+  say("m2", `Backup saved ✓ <span class="mut">(${escapeHtml(backupName)} in your Downloads)</span>`, "ok");
   stepState(2, "done");
 }
 function downloadBackup() {
@@ -198,6 +269,10 @@ async function flashFiles(files, barId, msgId) {
 async function doInstall() {
   stepState(3, "on");
   await flashFiles(parts, "p3", "m3");
+  for (const p of parts) {                     // second, independent check of everything that was written
+    const h = await loader.flashMd5sum(p.address, p.bytes.length);
+    if (String(h) !== p.md5) throw new Error(`check failed after writing (0x${p.address.toString(16)})`);
+  }
   $("p3").style.width = "100%";
   log("install verified, restarting purifier");
   say("m3", `Installed and checked ✓ <span class="mut">(V${manifest.version})</span>`, "ok");
@@ -266,10 +341,10 @@ async function waitAlive(totalMs) {
 
 async function afterInstall() {
   stepState(4, "on");
-  say("m4", "Starting the purifier…");
+  say("m4", "Starting the purifier… (the screen may flash a few times)");
   try { await openConsole(); } catch (e) { return fail(4, e); }
   let s = await waitAlive(30000);
-  if (!s) { say("m4", "The purifier didn't answer. Unplug the USB cable, plug it back in, then reload this page and click Connect again. (Your backup is already saved.)", "bad"); $("help").open = true; return; }
+  if (!s) { say("m4", "The purifier didn't answer. Unplug the USB cable, plug it back in, then reload this page and click Connect again. (Your backup is already saved. This page will see the software is already installed and go straight on.)", "bad"); $("help").open = true; return; }
   log(`firmware ${s.fw} screen ${s.screen} (${s.src}) wifi ${s.wifi} blynk ${s.blynk}`);
   const t = await cmd("@TOKEN " + TOKEN, (l) => l.startsWith("#OK|TOKEN") || l.startsWith("#ERR|TOKEN"));
   if (!t || !t.startsWith("#OK")) { say("m4", "Couldn't save the purifier's Blynk key. Send Nikhil the details below.", "bad"); $("help").open = true; return; }
@@ -314,28 +389,29 @@ async function wifiStep() {
   say("m5", s && s.ssid ? `The saved WiFi <b>${escapeHtml(s.ssid)}</b> isn't connecting. Pick your WiFi:` : "Pick your home WiFi:");
   showWifiForm();
 }
-$("bKeep").onclick = async () => { $("k5").classList.add("hide"); await finish(true); };
+$("bKeep").onclick = async () => { $("k5").classList.add("hide"); await finish("keep"); };
 $("bChange").onclick = () => { $("k5").classList.add("hide"); say("m5", "Pick your home WiFi:"); showWifiForm(); };
 $("bShow").onclick = () => { const p = $("pass"); p.type = p.type === "password" ? "text" : "password"; $("bShow").textContent = p.type === "password" ? "Show" : "Hide"; };
 $("bRescan").onclick = () => scan();
+$("bSkip").onclick = async () => { $("w5").classList.add("hide"); await finish("skip"); };
 
 async function showWifiForm() { $("w5").classList.remove("hide"); await scan(); }
 async function scan() {
   const sel = $("ssid");
   sel.innerHTML = "<option>Searching…</option>";
+  $("ssidOther").classList.add("hide");
   const nets = new Map();
   const collect = (l) => { if (l.startsWith("#NET|")) { const [, rssi, open, ...nm] = l.split("|"); const n = nm.join("|"); if (n && (!nets.has(n) || nets.get(n) < +rssi)) nets.set(n, +rssi); } return l.startsWith("#SCANEND"); };
   await cmd("@SCAN", collect, 15000);
   const list = [...nets.entries()].sort((a, b) => b[1] - a[1]);
   sel.innerHTML = list.map(([n, r]) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}  (${r > -60 ? "strong" : r > -75 ? "ok" : "weak"})</option>`).join("") +
     `<option value="__other">Other (type the name)…</option>`;
-  sel.onchange = () => {
-    if (sel.value === "__other") { const n = prompt("Type the WiFi name exactly:"); if (n) { sel.insertAdjacentHTML("afterbegin", `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`); sel.selectedIndex = 0; } }
-  };
+  if (!list.length) say("m5", "The purifier can't see any WiFi right now. It only works with <b>2.4 GHz</b> WiFi. Move it closer to the router, or turn on the 2.4 GHz band, then click Search again.", "warn");
+  sel.onchange = () => { $("ssidOther").classList.toggle("hide", sel.value !== "__other"); if (sel.value === "__other") $("ssidOther").focus(); };
 }
 $("bWifi").onclick = async () => {
-  const ssid = $("ssid").value, pass = $("pass").value;
-  if (!ssid || ssid === "__other") return say("m5", "Pick the WiFi name first.", "warn");
+  const ssid = $("ssid").value === "__other" ? $("ssidOther").value.trim() : $("ssid").value, pass = $("pass").value;
+  if (!ssid) return say("m5", "Pick the WiFi name first.", "warn");
   if (pass.includes("\t") || ssid.includes("\t")) return say("m5", "That name or password has an unusual character. Send Nikhil a message.", "bad");
   $("bWifi").disabled = true;
   say("m5", "Saving and restarting the purifier…");
@@ -343,10 +419,10 @@ $("bWifi").onclick = async () => {
   await sleep(3000);
   const ok = await waitWifi(45000);
   $("bWifi").disabled = false;
-  if (!ok) { say("m5", "It couldn't join that WiFi. Check the password (use Show) and click Connect WiFi again. The purifier must be within reach of the router.", "bad"); return; }
+  if (!ok) { say("m5", "It couldn't join that WiFi. Check the password (use Show) and click Connect WiFi again. The purifier must be within reach of the router, and the WiFi must be <b>2.4 GHz</b> (for a phone hotspot: turn on “Maximise compatibility” on iPhone, or set the band to 2.4 GHz on Android, and keep the hotspot screen open).", "bad"); return; }
   $("w5").classList.add("hide");
   say("m5", `Connected to <b>${escapeHtml(ssid)}</b> ✓`, "ok");
-  await finish(false);
+  await finish("new");
 };
 async function waitWifi(ms) {
   const end = Date.now() + ms;
@@ -360,10 +436,25 @@ async function waitWifi(ms) {
 }
 
 // ---------- finish ----------
-async function finish(needRestartForToken) {
+function renderSummary(s, online) {
+  $("sum").innerHTML = s ? [
+    ["Software", "V" + s.fw], ["Screen", s.screen], ["WiFi", s.wifi === "CONNECTED" ? `${escapeHtml(s.ssid)} (connected)` : "not connected"],
+    ["Blynk", online ? "online ✓" : s.blynk.toLowerCase()], ["Air sensor", s.pms === "OK" ? `working (AQI ${s.aqi})` : "warming up"],
+    ...(s.fancap ? [["Fan speed limit", `${s.fancap}% (adjusts itself to the power supply)`]] : []), ["Board", s.mac],
+  ].map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") : "";
+}
+async function finish(mode) {
   stepState(5, "done");
   stepState(6, "on");
-  if (needRestartForToken) {                   // the new token is used after a restart
+  if (mode === "skip") {
+    say("m5", "WiFi skipped for now.", "warn");
+    const s = await status();
+    renderSummary(s, false);
+    say("m6", "The software is installed, but the purifier isn't on WiFi yet. Nikhil can't update it until it is. To add WiFi later: unplug and re-plug the purifier's power, wait about 30 seconds (the setup WiFi stays on for 2 minutes), connect a phone to the WiFi called <b>AirPurifier-Setup</b> (password: <b>password</b>) and choose your home WiFi in the page that opens.", "warn");
+    $("after6").classList.remove("hide");
+    return;
+  }
+  if (mode === "keep") {                       // the new token is used after a restart
     say("m6", "Restarting the purifier once…");
     await cmd("@RESTART", "#OK|RESTART");
     await sleep(3000);
@@ -376,12 +467,10 @@ async function finish(needRestartForToken) {
   const end = Date.now() + 75000;
   while (Date.now() < end) { s = await status(2500); if (s && s.blynk === "ONLINE") break; await sleep(3000); }
   const online = s && s.blynk === "ONLINE";
-  $("sum").innerHTML = s ? [
-    ["Software", "V" + s.fw], ["Screen", s.screen], ["WiFi", `${escapeHtml(s.ssid)} (${s.wifi.toLowerCase()})`],
-    ["Blynk", online ? "online ✓" : s.blynk.toLowerCase()], ["Air sensor", s.pms === "OK" ? `working (AQI ${s.aqi})` : "warming up"], ["Board", s.mac],
-  ].map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") : "";
+  renderSummary(s, online);
+  $("after6").classList.remove("hide");
   if (online) {
-    say("m6", "All done ✅ You can unplug the USB cable and use the purifier normally.<br><span class='mut'>Please take a screenshot of this page and send it to Nikhil.</span>", "ok");
+    say("m6", "All done ✅ Last step below, then please take a screenshot of this page and send it to Nikhil.", "ok");
     stepState(6, "done");
   } else {
     say("m6", "The purifier works, but it isn't online in Blynk yet. Leave it plugged in for 2 more minutes; if it still isn't online, send Nikhil a screenshot and the details below.", "warn");
@@ -394,13 +483,15 @@ async function restore(bytes) {
   if (!port) { say("m1", "Click Connect first (pick the purifier), then use restore.", "warn"); return; }
   if (!confirm("Put the old software back on the purifier? (Takes about 2 minutes.)")) return;
   await closeConsole();
+  busy = true;
   try {
     await openLoader();
     $("help").open = true;
     log(`restoring ${bytes.length} bytes`);
-    await flashFiles([{ address: 0, bytes }], "p3", "m3");
+    const r = await retrySlower({ run: () => flashFiles([{ address: 0, bytes }], "p3", "m3"), reopen, current: goodBaud || SPEEDS[0], log });
     await loader.after("hard_reset");
     await closeLoader();
+    busy = false;
     say("m3", "Old software restored ✓. Unplug the USB cable.", "ok");
   } catch (e) { fail(3, e); }
 }

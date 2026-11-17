@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Air Purifier pre-check</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --txt:#f2f4f8; --mut:#a3abba; --ok:#3ccf7a; --warn:#ffb020; --bad:#ff5a5a; --acc:#4da3ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:17px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  .sub { color: var(--mut); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin: 14px 0; }
+  .card.good { border-color: #275a3c; }
+  .card h2 { font-size: 20px; margin: 0 0 8px; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 10px; padding: 12px 20px; background: var(--acc); color: #06121f; cursor: pointer; margin: 6px 8px 6px 0; }
+  button.alt { background: var(--line); color: var(--txt); }
+  button:disabled { opacity: .4; cursor: default; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .mut { color: var(--mut); }
+  .hide { display: none; }
+  .big { font-size: 24px; font-weight: 700; }
+  ul.checks { list-style: none; padding: 0; margin: 6px 0; } ul.checks li { display: flex; gap: 10px; padding: 3px 0; }
+  table { border-collapse: collapse; width: 100%; } td { padding: 4px 0; border-bottom: 1px solid var(--line); } td:first-child { color: var(--mut); width: 40%; }
+  details { margin-top: 14px; color: var(--mut); }
+  details.guide { background: #12151b; border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; }
+  details.guide summary { cursor: pointer; color: var(--txt); font-weight: 600; }
+  details.guide ol { margin: 8px 0 4px; padding-left: 22px; }
+  pre { background: #0a0c10; border: 1px solid var(--line); border-radius: 10px; padding: 10px; max-height: 260px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  a { color: var(--acc); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Purifier pre-check</h1>
+  <p class="sub">2 minutes. This only <b>reads</b> the board. It changes nothing and needs no password. Doing it a day early means we find any problem before the real update.</p>
+
+  <div class="card">
+    <h2>This laptop</h2>
+    <ul class="checks">
+      <li id="c-browser"><span class="ic">⏳</span><span class="tx">Checking the browser…</span></li>
+      <li id="c-os"><span class="ic">⏳</span><span class="tx">Checking the computer…</span></li>
+      <li id="c-net"><span class="ic">⏳</span><span class="tx">Checking the internet…</span></li>
+    </ul>
+  </div>
+
+  <div class="card" id="boxTest">
+    <h2>Test the USB cable and board</h2>
+    <p>Plug the purifier's small circuit board into the laptop with its USB cable. Then click the button and pick the item that says <b>CP210x</b>, <b>USB to UART</b>, <b>CH340</b> or <b>COM…</b>, and click <b>Connect</b> in that box.</p>
+    <button id="bTest">Test the USB connection</button>
+    <div id="msg" class="mut"></div>
+    <div id="tips" class="hide">
+      <p><b>The list is empty?</b> Open the matching guide, then click the button again:</p>
+      <details class="guide" id="g-windows">
+        <summary>Windows: install the USB driver</summary>
+        <ol>
+          <li>Keep the board plugged in. Press the Windows key, type <b>Device Manager</b>, open it.</li>
+          <li>Under <b>Other devices</b> look for <b>CP2102 USB to UART Bridge Controller</b> (or “Unknown device”) with a yellow ⚠. (If it's under <b>Ports (COM &amp; LPT)</b> as <b>Silicon Labs CP210x</b>, the driver is fine, so try another USB cable or port.)</li>
+          <li>Download <a href="https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers" target="_blank" rel="noopener">“CP210x Universal Windows Driver”</a> and right-click it → <b>Extract All</b>.</li>
+          <li>Back in Device Manager: right-click the ⚠ item → <b>Update driver</b> → <b>Browse my computer for drivers</b> → pick the extracted folder → <b>Next</b>.</li>
+          <li>Unplug and re-plug the board, then click <b>Test the USB connection</b> again.</li>
+          <li>If the board says <b>CH340</b>, use the <a href="https://www.wch-ic.com/downloads/CH341SER_EXE.html" target="_blank" rel="noopener">CH340 driver</a> instead.</li>
+        </ol>
+      </details>
+      <details class="guide" id="g-mac">
+        <summary>Mac</summary>
+        <ol>
+          <li>Most Macs need no driver. Try another USB cable (some only charge) and plug it straight into the Mac (use an adapter, not a hub, for USB-C).</li>
+          <li>If the board says <b>CH340</b>, install the <a href="https://www.wch-ic.com/downloads/CH341SER_MAC_ZIP.html" target="_blank" rel="noopener">CH340 driver</a>, restart the Mac and try again.</li>
+        </ol>
+      </details>
+      <details class="guide" id="g-other"><summary>Any laptop</summary><ol><li>Try a different USB cable (the one that came with the board if possible) and a different USB port directly on the laptop.</li><li>Close Arduino IDE and any other page or program that uses the purifier.</li></ol></details>
+    </div>
+  </div>
+
+  <div class="card good hide" id="result">
+    <div class="big ok">Ready ✓</div>
+    <p>The laptop, cable and board all work. Please take a screenshot of this page and send it to Nikhil.</p>
+    <table id="sum"></table>
+    <p class="mut" id="speedNote"></p>
+  </div>
+
+  <details>
+    <summary>Details for Nikhil</summary>
+    <p><button class="alt" id="bLog">Copy details</button></p>
+    <pre id="log"></pre>
+  </details>
+  <p class="mut" style="text-align:center;font-size:13px">Pre-check page version <span id="ver"></span></p>
+</main>
+<script type="module" src="check.js?v=20261117"></script>
+</body>
+</html>

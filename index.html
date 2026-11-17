@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
+<meta http-equiv="Cache-Control" content="no-cache">
 <title>Air Purifier Setup</title>
 <style>
   :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --txt:#f2f4f8; --mut:#a3abba; --ok:#3ccf7a; --warn:#ffb020; --bad:#ff5a5a; --acc:#4da3ff; }
@@ -30,23 +31,49 @@
   input, select { font: inherit; width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line); background: #0c0e12; color: var(--txt); margin: 4px 0 10px; }
   label { color: var(--mut); font-size: 15px; }
   .row { display: flex; gap: 8px; align-items: center; } .row input { flex: 1; }
-  details { margin-top: 24px; color: var(--mut); }
+  details { margin-top: 14px; color: var(--mut); }
+  details.guide { background: #12151b; border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; }
+  details.guide summary { cursor: pointer; color: var(--txt); font-weight: 600; }
+  details.guide ol { margin: 8px 0 4px; padding-left: 22px; }
   pre { background: #0a0c10; border: 1px solid var(--line); border-radius: 10px; padding: 10px; max-height: 300px; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
   .big { font-size: 22px; font-weight: 700; }
   .hide { display: none; }
   table { border-collapse: collapse; width: 100%; } td { padding: 4px 0; border-bottom: 1px solid var(--line); } td:first-child { color: var(--mut); width: 40%; }
+  ul.checks { list-style: none; padding: 0; margin: 6px 0; } ul.checks li { display: flex; gap: 10px; padding: 3px 0; }
+  a { color: var(--acc); }
+  footer { margin-top: 30px; color: var(--mut); font-size: 13px; text-align: center; }
 </style>
 </head>
 <body>
 <main>
   <h1>Air Purifier Setup</h1>
-  <p class="sub" id="who">One-time update. About 5 minutes. After this, updates happen over WiFi.</p>
+  <p class="sub" id="who">One-time update. About 5 to 10 minutes. After this, updates happen over WiFi.</p>
 
   <div id="unsupported" class="card hide">
     <h2>Please open this link in <u>Google Chrome</u> or <u>Microsoft Edge</u> on a laptop</h2>
-    <p class="mut">This browser can't talk to the purifier's USB port (Safari, Firefox and phones can't).</p>
+    <p class="mut" id="unsupportedWhy">This browser can't talk to the purifier's USB port (Safari, Firefox and phones can't).</p>
   </div>
-  <div id="badlink" class="card hide"><h2 class="bad">This link is incomplete</h2><p>Please ask Nikhil to send the link again.</p></div>
+  <div id="badlink" class="card hide"><h2 class="bad">This link is incomplete</h2><p id="badlinkMsg">Please ask Nikhil to send the link again.</p></div>
+
+  <div class="card" id="s0">
+    <h2>Before you start</h2>
+    <ul class="checks">
+      <li id="c-browser"><span class="ic">⏳</span><span class="tx">Checking the browser…</span></li>
+      <li id="c-fw"><span class="ic">⏳</span><span class="tx">Getting the software…</span></li>
+      <li><span class="ic">🔌</span><span class="tx">Use the USB cable that came with the board (some cables only charge). Plug it straight into the laptop, not into a hub.</span></li>
+    </ul>
+    <details class="guide">
+      <summary>Windows laptop: does it need a driver?</summary>
+      <ol>
+        <li>Plug the purifier's small board into the laptop.</li>
+        <li>Press the Windows key, type <b>Device Manager</b> and open it.</li>
+        <li>Look for <b>CP2102 USB to UART Bridge Controller</b> (or “Unknown device”) with a yellow ⚠ under <b>Other devices</b>. If you see <b>Silicon Labs CP210x … (COM3)</b> under <b>Ports (COM &amp; LPT)</b>, the driver is already fine.</li>
+        <li>If there's a ⚠: download <a href="https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers" target="_blank" rel="noopener">“CP210x Universal Windows Driver”</a>, right-click the downloaded file → <b>Extract All</b>.</li>
+        <li>In Device Manager right-click the ⚠ item → <b>Update driver</b> → <b>Browse my computer for drivers</b> → pick the extracted folder → <b>Next</b>. Unplug and re-plug the board.</li>
+        <li>If the board says <b>CH340</b> instead, use the <a href="https://www.wch-ic.com/downloads/CH341SER_EXE.html" target="_blank" rel="noopener">CH340 driver</a>.</li>
+      </ol>
+    </details>
+  </div>
 
   <div class="card" id="s1">
     <h2><span class="num">1</span> Connect the purifier</h2>
@@ -54,15 +81,14 @@
     <button id="bConnect">Connect</button>
     <div class="msg" id="m1"></div>
     <div id="tips1" class="hide mut">
-      <p><b>Nothing in the list?</b> Try another USB cable (some only charge), or another USB port. On Windows the driver can take a minute to install the first time, then try again.
-      If it still doesn't appear, install the <a href="https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers" target="_blank" rel="noopener">CP210x driver</a> (Windows: "CP210x Windows Drivers").</p>
-      <p><b>"Failed to connect"?</b> Press and <b>hold the BOOT button</b> on the board, click Connect again, and let go once it says connected.</p>
+      <p><b>Nothing in the list?</b> (1) Try another USB cable, some only charge. (2) Try another USB port, directly on the laptop. (3) On Windows open the driver guide at the top of this page. (4) Close Arduino IDE or any other page that uses the purifier.</p>
+      <p><b>“Failed to connect”?</b> Press and <b>hold the BOOT button</b> on the board, click Connect again, and let go once it says connected. (If the button can't be reached, just try again, the page also retries by itself at slower speeds.)</p>
     </div>
   </div>
 
   <div class="card off" id="s2">
     <h2><span class="num">2</span> Save a backup</h2>
-    <p>Saves the purifier's current software to this laptop first, so nothing can be lost. Takes 1–7 minutes depending on the connection speed.</p>
+    <p>Saves the purifier's current software to this laptop first, so nothing can be lost. Takes 1–7 minutes depending on the connection speed. <b>Keep the backup file.</b></p>
     <div class="bar"><div id="p2"></div></div>
     <div class="msg" id="m2"></div>
   </div>
@@ -95,10 +121,13 @@
     <div id="w5" class="hide">
       <label for="ssid">WiFi name</label>
       <select id="ssid"></select>
+      <input id="ssidOther" class="hide" type="text" placeholder="Type the WiFi name exactly" autocomplete="off" spellcheck="false">
       <label for="pass">WiFi password</label>
       <div class="row"><input id="pass" type="password" autocomplete="off"><button class="alt" id="bShow" type="button">Show</button></div>
       <button id="bWifi">Connect WiFi</button>
       <button class="alt" id="bRescan" type="button">Search again</button>
+      <p class="mut">The purifier only works with <b>2.4 GHz</b> WiFi (not 5 GHz). Phone hotspot: iPhone → turn on “Maximise Compatibility”; Android → set the band to 2.4 GHz; keep the hotspot screen open while it connects.</p>
+      <button class="alt" id="bSkip" type="button">Skip WiFi for now</button>
     </div>
     <div id="k5" class="hide">
       <button id="bKeep">Keep this WiFi</button><button class="alt" id="bChange">Use a different WiFi</button>
@@ -110,6 +139,15 @@
     <h2><span class="num">6</span> Finished</h2>
     <div class="msg" id="m6"></div>
     <table id="sum"></table>
+    <div id="after6" class="hide">
+      <p class="big">Last step</p>
+      <ol>
+        <li>Unplug the USB cable.</li>
+        <li>Power the purifier the normal way (its own power adapter).</li>
+        <li>After about 10 seconds the screen shows the air reading. A few seconds later the fan starts and speeds up slowly. That is normal.</li>
+        <li>If the screen ever goes white or the purifier restarts by itself, tell Nikhil. It means the power adapter is weak. The software already protects the purifier by limiting the fan.</li>
+      </ol>
+    </div>
   </div>
 
   <details id="help">
@@ -122,7 +160,8 @@
     <p class="mut">To restore from a saved backup file instead: <input type="file" id="fRestore" accept=".bin"></p>
     <pre id="log"></pre>
   </details>
+  <footer>Installer page version <span id="ver"></span></footer>
 </main>
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=20261117"></script>
 </body>
 </html>
